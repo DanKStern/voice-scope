@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Scope</title>
+<style>
+  :root {
+    --bg: #14182b;
+    --panel: #1d2340;
+    --screen: #050b08;
+    --grid: rgba(124, 255, 178, 0.08);
+    --phosphor: #7cffb2;
+    --text: #eef1ff;
+    --muted: #9aa3c7;
+    --rec: #ff5a5a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 18px/1.4 system-ui, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h1 { margin: 0 0 4px; font-size: 30px; letter-spacing: 0.5px; }
+  #status { font-size: 24px; min-height: 34px; margin: 4px 0 12px; color: var(--phosphor); }
+  .screen-label { font-size: 15px; color: var(--muted); margin: 10px 0 4px; }
+  canvas {
+    display: block; width: 100%; background: var(--screen);
+    border-radius: 14px; border: 3px solid #2b3560; touch-action: none;
+  }
+  #top { height: 190px; cursor: pointer; }
+  #bot { height: 230px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; align-items: stretch; }
+  button {
+    font: inherit; font-size: 22px; font-weight: 600; color: var(--text);
+    background: var(--panel); border: 3px solid #3a4680; border-radius: 16px;
+    padding: 12px 22px; cursor: pointer; min-height: 64px;
+  }
+  button:disabled { opacity: 0.35; cursor: default; }
+  button.big { background: #2c6e4a; border-color: #4fc283; }
+  button.rec { background: #7a2430; border-color: var(--rec); }
+  button.toggled { background: #3a4680; border-color: #8fa0ff; }
+  .band {
+    flex: 1 1 140px; display: flex; flex-direction: column; align-items: center;
+    gap: 2px; border-color: var(--c); opacity: 0.45; padding: 10px 8px;
+  }
+  .band.on { background: color-mix(in srgb, var(--c) 30%, var(--panel)); opacity: 1; }
+  .band:disabled { opacity: 0.2; }
+  .band .emo { font-size: 40px; line-height: 1; }
+  .band .sub { font-size: 13px; font-weight: 400; color: var(--muted); }
+  #bandHint { font-size: 15px; color: var(--muted); margin: -6px 0 0; }
+  details { margin-top: 24px; background: var(--panel); border-radius: 12px; padding: 10px 16px; font-size: 16px; }
+  summary { cursor: pointer; color: var(--muted); }
+  details label { display: block; margin: 12px 0 4px; }
+  details input[type=range] { width: min(400px, 100%); }
+  .note { color: var(--muted); font-size: 14px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Voice Scope</h1>
+  <div id="status">Press Start to wake up the microphone.</div>
+
+  <div class="screen-label">Your voice over time — how loud</div>
+  <canvas id="top"></canvas>
+  <div class="screen-label">Zoomed way in — the wiggles</div>
+  <canvas id="bot"></canvas>
+
+  <div class="row">
+    <button id="startBtn" class="big">🎤 Start</button>
+    <button id="recBtn" class="rec" disabled>🔴 Record</button>
+    <button id="playBtn" disabled>▶ Play</button>
+    <button id="loopBtn" disabled>🔁 Loop</button>
+    <button id="liveBtn" disabled>🎤 Live</button>
+  </div>
+
+  <div class="row" id="bands"></div>
+  <p id="bandHint">Record something, then switch the animals on and off to hear each part of your voice.</p>
+  <div class="row"><button id="allBtn" disabled>All on</button></div>
+
+  <details>
+    <summary>Grown-up settings</summary>
+    <label for="calib">Mic boost (picture only): <span id="calibVal"></span>×</label>
+    <input id="calib" type="range" min="1" max="20" step="0.5">
+    <div>Talk normally and slide this until your voice reaches the “talking” line.</div>
+    <label for="vol">Playback volume: <span id="volVal"></span>×</label>
+    <input id="vol" type="range" min="0.5" max="6" step="0.5">
+    <div class="note">
+      Bands: Bear &lt; 300 Hz · Person 300–1000 Hz · Bird 1000–3000 Hz · Snake &gt; 3000 Hz
+      (4th-order crossover filters). Add <code>?test</code> to the address to use a built-in test sound instead of the microphone.
+    </div>
+  </details>
+
+  <p class="note">Your voice never leaves this computer — nothing is uploaded or saved. Recording only happens when you press Record.</p>
+</main>
+
+<script>
+const BANDS = [
+  { name: 'Bear',   emoji: '🐻', sub: 'low',    lo: null, hi: 300,  color: '#ff9a4a' },
+  { name: 'Person', emoji: '🙂', sub: 'middle', lo: 300,  hi: 1000, color: '#ffd84a' },
+  { name: 'Bird',   emoji: '🐦', sub: 'upper',  lo: 1000, hi: 3000, color: '#5cc8ff' },
+  { name: 'Snake',  emoji: '🐍', sub: 'hiss',   lo: 3000, hi: null, color: '#b58cff' },
+];
+const LEVELS = [
+  { name: 'whisper',  v: 0.08 },
+  { name: 'talking',  v: 0.3 },
+  { name: 'shouting', v: 0.75 },
+];
+const RECORD_SECONDS = 4;
+const WIGGLE_SAMPLES = 1024;   // ~21 ms shown on the zoomed screen
+const HISTORY_COLS = 300;      // scrolling loudness line width
+const TEST = new URLSearchParams(location.search).has('test');
+
+const $ = s => document.querySelector(s);
+const topC = $('#top'), botC = $('#bot');
+
+function load(k, d) { try { const v = localStorage.getItem('voicescope.' + k); return v === null ? d : parseFloat(v); } catch { return d; } }
+function save(k, v) { try { localStorage.setItem('voicescope.' + k, v); } catch {} }
+
+let calib = load('calib', 4), vol = load('vol', 2);
+let ctx, analyser, master, liveBuf;
+let mode = 'off';              // off | live | countdown | recording | processing | frozen
+let history = new Float32Array(HISTORY_COLS), histIdx = 0;
+let recChunks = [], recLength = 0;
+let recording = null;          // raw mono samples
+let bandData = [], bandBuffers = [];
+let enabled = BANDS.map(() => true);
+let mix = null, envCache = null;
+let playhead = 0, playing = null, loop = false;
+let countdownText = '';
+
+// ---------- audio setup ----------
+
+async function startMic() {
+  try {
+    ctx = new AudioContext();
+    let source;
+    if (TEST) {
+      source = makeTestSource();
+    } else {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+      source = ctx.createMediaStreamSource(stream);
+    }
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    liveBuf = new Float32Array(analyser.fftSize);
+    source.connect(analyser);
+
+    // Raw capture (no compression) so the recording matches what's on screen.
+    const capture = ctx.createScriptProcessor(4096, 1, 1);
+    const silent = ctx.createGain(); silent.gain.value = 0;
+    source.connect(capture); capture.connect(silent); silent.connect(ctx.destination);
+    capture.onaudioprocess = e => {
+      if (mode !== 'recording') return;
+      const d = e.inputBuffer.getChannelData(0);
+      recChunks.push(new Float32Array(d));
+      recLength += d.length;
+      if (recLength >= RECORD_SECONDS * ctx.sampleRate) finishRecording();
+    };
+
+    // The mic is never routed to the speakers, so there's no feedback squeal.
+    master = ctx.createGain(); master.gain.value = vol;
+    master.connect(ctx.destination);
+
+    mode = 'live';
+  } catch (err) {
+    setStatus('The microphone didn’t start: ' + err.message + '. Check the browser’s mic permission.');
+  }
+  ui();
+}
+
+function makeTestSource() {
+  // A fake "voice": wobbling 220 Hz tone + harmonics + a hiss burst, pulsing like syllables.
+  const out = ctx.createGain();
+  const syll = ctx.createGain(); syll.gain.value = 0.5;
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 2.5;
+  const lfoAmt = ctx.createGain(); lfoAmt.gain.value = 0.5;
+  lfo.connect(lfoAmt); lfoAmt.connect(syll.gain); lfo.start();
+  [[220, 0.12], [660, 0.06], [1500, 0.03]].forEach(([f, a]) => {
+    const o = ctx.createOscillator(); o.frequency.value = f;
+    const g = ctx.createGain(); g.gain.value = a;
+    o.connect(g); g.connect(syll); o.start();
+  });
+  const n = ctx.sampleRate * 2, nb = ctx.createBuffer(1, n, ctx.sampleRate), d = nb.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (i % ctx.sampleRate < ctx.sampleRate * 0.25 ? 0.08 : 0);
+  const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true;
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 4000;
+  ns.connect(hp); hp.connect(out); ns.start();
+  syll.connect(out);
+  return out;
+}
+
+// ---------- recording ----------
+
+function record() {
+  stopPlayback();
+  mode = 'countdown';
+  let n = 3;
+  const tick = () => {
+    if (n > 0) { countdownText = n + '…'; n--; ui(); setTimeout(tick, 700); return; }
+    recChunks = []; recLength = 0;
+    mode = 'recording';
+    ui();
+  };
+  tick();
+}
+
+async function finishRecording() {
+  mode = 'processing';
+  ui();
+  const total = RECORD_SECONDS * ctx.sampleRate;
+  recording = new Float32Array(total);
+  let off = 0;
+  for (const c of recChunks) {
+    const take = Math.min(c.length, total - off);
+    recording.set(c.subarray(0, take), off);
+    off += take;
+    if (off >= total) break;
+  }
+  recChunks = [];
+  await renderBands();
+  playhead = 0;
+  mode = 'frozen';
+  ui();
+}
+
+// Split the recording into the four bands once, offline, so the pictures can show each band too.
+async function renderBands() {
+  const sr = ctx.sampleRate, n = recording.length;
+  bandData = await Promise.all(BANDS.map(async b => {
+    const off = new OfflineAudioContext(1, n, sr);
+    const buf = off.createBuffer(1, n, sr);
+    buf.copyToChannel(recording, 0);
+    const src = off.createBufferSource(); src.buffer = buf;
+    let node = src;
+    // Two cascaded Butterworth stages = Linkwitz-Riley crossover, so the bands add back up to the original.
+    const stage = (type, f) => {
+      for (let i = 0; i < 2; i++) {
+        const bq = off.createBiquadFilter();
+        bq.type = type; bq.frequency.value = f; bq.Q.value = Math.SQRT1_2;
+        node.connect(bq); node = bq;
+      }
+    };
+    if (b.lo) stage('highpass', b.lo);
+    if (b.hi) stage('lowpass', b.hi);
+    node.connect(off.destination);
+    src.start();
+    const rendered = await off.startRendering();
+    return rendered.getChannelData(0).slice();
+  }));
+  bandBuffers = bandData.map(d => {
+    const b = ctx.createBuffer(1, d.length, sr);
+    b.copyToChannel(d, 0);
+    return b;
+  });
+  recomputeMix();
+}
+
+function recomputeMix() {
+  if (!bandData.length) return;
+  const n = bandData[0].length;
+  mix = new Float32Array(n);
+  bandData.forEach((d, i) => { if (enabled[i]) for (let j = 0; j < n; j++) mix[j] += d[j]; });
+  envCache = null;
+}
+
+// ---------- playback ----------
+
+function duration() { return recording ? recording.length / ctx.sampleRate : 0; }
+
+function play() {
+  stopPlayback();
+  if (playhead >= duration() - 0.05) playhead = 0;
+  const start = ctx.currentTime + 0.05, offset = playhead;
+  const sources = [], gains = [];
+  bandBuffers.forEach((buf, i) => {
+    const s = ctx.createBufferSource(); s.buffer = buf; s.loop = loop;
+    const g = ctx.createGain(); g.gain.value = enabled[i] ? 1 : 0;
+    s.connect(g); g.connect(master);
+    s.start(start, offset);
+    sources.push(s); gains.push(g);
+  });
+  const p = { sources, gains, start, offset };
+  sources[0].onended = () => {
+    if (playing === p) { playing = null; playhead = 0; ui(); }
+  };
+  playing = p;
+  ui();
+}
+
+function stopPlayback() {
+  if (!playing) return;
+  const p = playing; playing = null;
+  p.sources.forEach(s => { s.onended = null; try { s.stop(); } catch {} });
+  ui();
+}
+
+function currentPosition() {
+  if (!playing) return playhead;
+  const t = Math.max(0, ctx.currentTime - playing.start) + playing.offset;
+  return loop ? t % duration() : Math.min(t, duration());
+}
+
+function toggleBand(i) {
+  enabled[i] = !enabled[i];
+  if (playing) playing.gains[i].gain.setTargetAtTime(enabled[i] ? 1 : 0, ctx.currentTime, 0.015);
+  recomputeMix();
+  ui();
+}
+
+function allOn() {
+  BANDS.forEach((_, i) => { if (!enabled[i]) toggleBand(i); });
+}
+
+// ---------- drawing ----------
+
+function fit(c) {
+  const r = c.getBoundingClientRect(), d = devicePixelRatio || 1;
+  const w = Math.round(r.width * d), h = Math.round(r.height * d);
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; envCache = null; }
+}
+
+function yOf(v, h) {
+  const a = Math.max(-1, Math.min(1, v * calib));
+  return h / 2 - a * (h / 2) * 0.92;
+}
+
+function drawBackground(g, w, h, labels) {
+  g.fillStyle = '#050b08'; g.fillRect(0, 0, w, h);
+  g.strokeStyle = 'rgba(124,255,178,0.08)'; g.lineWidth = 1;
+  for (let x = 0; x < w; x += w / 10) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+  g.strokeStyle = 'rgba(124,255,178,0.25)';
+  g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+  const d = devicePixelRatio || 1;
+  g.font = `${13 * d}px system-ui, sans-serif`;
+  g.setLineDash([6 * d, 6 * d]);
+  LEVELS.forEach(L => {
+    const off = L.v * (h / 2) * 0.92;
+    g.strokeStyle = 'rgba(255,255,255,0.28)';
+    [h / 2 - off, h / 2 + off].forEach(y => { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); });
+    if (labels) { g.fillStyle = 'rgba(255,255,255,0.6)'; g.fillText(L.name, 8 * d, h / 2 - off - 4 * d); }
+  });
+  g.setLineDash([]);
+}
+
+function traceColor() {
+  const on = enabled.map((e, i) => e ? i : -1).filter(i => i >= 0);
+  return mode === 'frozen' && on.length === 1 ? BANDS[on[0]].color : '#7cffb2';
+}
+
+function drawBars(g, w, h, peaks, color) {
+  const cw = w / peaks.length;
+  g.fillStyle = color;
+  for (let i = 0; i < peaks.length; i++) {
+    const top = yOf(peaks[i], h), bot = h - top;
+    g.fillRect(i * cw, top, Math.max(1, cw - 0.5), Math.max(1, bot - top));
+  }
+}
+
+function envelope(data, cols) {
+  const out = new Float32Array(cols), n = data.length;
+  for (let c = 0; c < cols; c++) {
+    let p = 0;
+    const a = Math.floor(c * n / cols), b = Math.floor((c + 1) * n / cols);
+    for (let j = a; j < b; j++) { const v = Math.abs(data[j]); if (v > p) p = v; }
+    out[c] = p;
+  }
+  return out;
+}
+
+function drawWiggle(g, w, h, data, ghost, from) {
+  // Trigger on a rising zero crossing so the wave holds still, like a real scope.
+  let s = from;
+  for (let i = from + 1; i < from + WIGGLE_SAMPLES && i < data.length; i++) {
+    if (data[i - 1] < 0 && data[i] >= 0) { s = i; break; }
+  }
+  const d = devicePixelRatio || 1;
+  const line = (arr, color, width, glow) => {
+    g.strokeStyle = color; g.lineWidth = width * d;
+    g.shadowColor = color; g.shadowBlur = glow * d;
+    g.beginPath();
+    for (let k = 0; k < WIGGLE_SAMPLES && s + k < arr.length; k++) {
+      const x = k / (WIGGLE_SAMPLES - 1) * w, y = yOf(arr[s + k], h);
+      k ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.stroke(); g.shadowBlur = 0;
+  };
+  if (ghost) line(ghost, 'rgba(255,255,255,0.18)', 2, 0);
+  line(data, traceColor(), 3, 10);
+}
+
+function frame() {
+  fit(topC); fit(botC);
+  const tg = topC.getContext('2d'), bg = botC.getContext('2d');
+  const tw = topC.width, th = topC.height, bw = botC.width, bh = botC.height;
+  drawBackground(tg, tw, th, true);
+  drawBackground(bg, bw, bh, true);
+
+  if (mode === 'live' || mode === 'countdown' || mode === 'recording') {
+    analyser.getFloatTimeDomainData(liveBuf);
+    let p = 0;
+    for (let i = 0; i < liveBuf.length; i++) { const v = Math.abs(liveBuf[i]); if (v > p) p = v; }
+    history[histIdx] = p; histIdx = (histIdx + 1) % HISTORY_COLS;
+    const ordered = new Float32Array(HISTORY_COLS);
+    for (let i = 0; i < HISTORY_COLS; i++) ordered[i] = history[(histIdx + i) % HISTORY_COLS];
+    drawBars(tg, tw, th, ordered, mode === 'recording' ? '#ff5a5a' : '#7cffb2');
+    drawWiggle(bg, bw, bh, liveBuf, null, 0);
+    if (mode === 'recording') setStatus('🔴 Talk now! ' + Math.max(0, RECORD_SECONDS - recLength / ctx.sampleRate).toFixed(1) + 's left');
+  } else if (mode === 'frozen') {
+    const cols = Math.floor(tw / (2 * (devicePixelRatio || 1)));
+    if (!envCache || envCache.cols !== cols) {
+      envCache = { cols, orig: envelope(recording, cols), mix: envelope(mix, cols) };
+    }
+    drawBars(tg, tw, th, envCache.orig, 'rgba(255,255,255,0.12)');
+    drawBars(tg, tw, th, envCache.mix, traceColor());
+    const pos = currentPosition();
+    if (playing) playhead = pos;
+    const px = pos / duration() * tw;
+    tg.fillStyle = '#ffffff'; tg.fillRect(px - 1.5, 0, 3, th);
+    const sr = ctx.sampleRate;
+    const from = Math.min(Math.floor(pos * sr), mix.length - 2 * WIGGLE_SAMPLES);
+    drawWiggle(bg, bw, bh, mix, recording, Math.max(0, from));
+  }
+  requestAnimationFrame(frame);
+}
+
+// Tap or drag on the top screen to choose which moment the zoomed screen shows.
+let dragging = false;
+function seek(e) {
+  if (mode !== 'frozen') return;
+  const r = topC.getBoundingClientRect();
+  playhead = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * duration();
+  if (playing) play();
+}
+topC.addEventListener('pointerdown', e => { dragging = true; topC.setPointerCapture(e.pointerId); seek(e); });
+topC.addEventListener('pointermove', e => { if (dragging && !playing) seek(e); });
+topC.addEventListener('pointerup', () => { dragging = false; });
+
+// ---------- UI ----------
+
+function setStatus(t) { $('#status').textContent = t; }
+
+function ui() {
+  const ready = !!ctx && mode !== 'off';
+  const busy = mode === 'countdown' || mode === 'recording' || mode === 'processing';
+  const have = !!recording && mode === 'frozen';
+  $('#startBtn').style.display = ready ? 'none' : '';
+  $('#recBtn').disabled = !ready || busy;
+  $('#playBtn').disabled = !have;
+  $('#playBtn').textContent = playing ? '⏹ Stop' : '▶ Play';
+  $('#loopBtn').disabled = !have;
+  $('#loopBtn').classList.toggle('toggled', loop);
+  $('#liveBtn').disabled = !have;
+  $('#allBtn').disabled = !have;
+  BANDS.forEach((b, i) => { b.el.disabled = !have; b.el.classList.toggle('on', enabled[i]); });
+  $('#bandHint').style.visibility = have ? 'hidden' : 'visible';
+
+  if (mode === 'live') setStatus(TEST ? 'Test sound playing into the scope. Press Record.' : 'I’m listening — talk, sing, or whisper! Press Record to catch it.');
+  else if (mode === 'countdown') setStatus('Get ready… ' + countdownText);
+  else if (mode === 'processing') setStatus('Got it!');
+  else if (mode === 'frozen') setStatus(playing ? 'Listen! Try switching the animals on and off.' : 'Press Play to hear it. Tap the top screen to zoom in on a moment.');
+}
+
+BANDS.forEach((b, i) => {
+  const el = document.createElement('button');
+  el.className = 'band on';
+  el.style.setProperty('--c', b.color);
+  el.innerHTML = `<span class="emo">${b.emoji}</span><span>${b.name}</span><span class="sub">${b.sub}</span>`;
+  el.onclick = () => toggleBand(i);
+  $('#bands').appendChild(el);
+  b.el = el;
+});
+
+$('#startBtn').onclick = startMic;
+$('#recBtn').onclick = record;
+$('#playBtn').onclick = () => playing ? stopPlayback() : play();
+$('#loopBtn').onclick = () => {
+  loop = !loop;
+  if (playing) playing.sources.forEach(s => s.loop = loop);
+  ui();
+};
+$('#liveBtn').onclick = () => { stopPlayback(); mode = 'live'; ui(); };
+$('#allBtn').onclick = allOn;
+
+$('#calib').value = calib; $('#calibVal').textContent = calib;
+$('#calib').oninput = e => { calib = parseFloat(e.target.value); $('#calibVal').textContent = calib; save('calib', calib); envCache = null; };
+$('#vol').value = vol; $('#volVal').textContent = vol;
+$('#vol').oninput = e => { vol = parseFloat(e.target.value); $('#volVal').textContent = vol; save('vol', vol); if (master) master.gain.value = vol; };
+
+ui();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
