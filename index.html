@@ -54,17 +54,25 @@
   details label { display: block; margin: 12px 0 4px; }
   details input[type=range] { width: min(400px, 100%); }
   .note { color: var(--muted); font-size: 14px; margin-top: 18px; }
+  .intro { color: var(--muted); font-size: 16px; margin: 0 0 10px; max-width: 760px; }
+  .privacy {
+    background: rgba(124,255,178,0.1); border: 2px solid var(--phosphor); border-radius: 12px;
+    padding: 12px 16px; font-size: 16px; margin: 14px 0; color: var(--text);
+  }
 </style>
 </head>
 <body>
 <main>
   <h1>Voice Scope</h1>
+  <p class="intro">A kid-friendly way to see your voice as a picture — a companion tool for the <strong>Technology for Young Learners</strong> curriculum. Works in any modern browser with a microphone, nothing to install.</p>
   <div id="status">Press Start to wake up the microphone.</div>
 
   <div class="screen-label">Your voice over time — how loud</div>
   <canvas id="top"></canvas>
   <div class="screen-label">Zoomed way in — the wiggles</div>
   <canvas id="bot"></canvas>
+
+  <p class="privacy">🔒 Nothing is uploaded or saved — your voice never leaves this computer. Recording only happens when you press Record, and only lasts 4 seconds.</p>
 
   <div class="row">
     <button id="startBtn" class="big">🎤 Start</button>
@@ -90,8 +98,6 @@
       (4th-order crossover filters). Add <code>?test</code> to the address to use a built-in test sound instead of the microphone.
     </div>
   </details>
-
-  <p class="note">Your voice never leaves this computer — nothing is uploaded or saved. Recording only happens when you press Record.</p>
 </main>
 
 <script>
